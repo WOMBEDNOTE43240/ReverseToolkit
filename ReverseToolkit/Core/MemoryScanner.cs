@@ -286,34 +286,71 @@ namespace ReverseToolkit
         {
             while (isFreezingActive && frozenAddresses.Count > 0)
             {
+                // Если процесс недоступен — ждём и повторяем
+                if (processHandle == IntPtr.Zero)
+                {
+                    Thread.Sleep(200);
+                    continue;
+                }
+
                 foreach (var frozen in frozenAddresses.ToList())
                 {
                     var result = currentResults.FirstOrDefault(r => r.Address == frozen.Key);
                     if (result != null)
                     {
                         byte[] bytes = ConvertValueToBytes(frozen.Value, result.Type);
-                        WriteProcessMemory(processHandle, (IntPtr)frozen.Key, bytes, bytes.Length, out _);
+                        // Пишем только если есть действительный handle
+                        if (processHandle != IntPtr.Zero)
+                        {
+                            WriteProcessMemory(processHandle, (IntPtr)frozen.Key, bytes, bytes.Length, out _);
+                        }
                     }
                 }
 
                 Thread.Sleep(100); // Update every 100ms
             }
+
+            // Останавливаем флаг при выходе
+            isFreezingActive = false;
         }
 
         private byte[] ConvertValueToBytes(string value, string valueType)
         {
             try
             {
-                return valueType switch
+                byte[] raw;
+                switch (valueType)
                 {
-                    "Int32" => BitConverter.GetBytes(int.Parse(value)),
-                    "Int64" => BitConverter.GetBytes(long.Parse(value)),
-                    "Float" => BitConverter.GetBytes(float.Parse(value)),
-                    "Double" => BitConverter.GetBytes(double.Parse(value)),
-                    "String" => Encoding.ASCII.GetBytes(value),
-                    "Bytes" => ParseHexString(value),
-                    _ => new byte[4]
-                };
+                    case "Int32":
+                        raw = BitConverter.GetBytes(int.Parse(value));
+                        break;
+                    case "Int64":
+                        raw = BitConverter.GetBytes(long.Parse(value));
+                        break;
+                    case "Float":
+                        raw = BitConverter.GetBytes(float.Parse(value));
+                        break;
+                    case "Double":
+                        raw = BitConverter.GetBytes(double.Parse(value));
+                        break;
+                    case "String":
+                        raw = Encoding.ASCII.GetBytes(value);
+                        break;
+                    case "Bytes":
+                        raw = ParseHexString(value);
+                        break;
+                    default:
+                        raw = new byte[4];
+                        break;
+                }
+
+                int targetSize = GetTypeSize(valueType);
+                if (raw.Length == targetSize)
+                    return raw;
+
+                var result = new byte[targetSize];
+                Array.Copy(raw, 0, result, 0, Math.Min(raw.Length, targetSize));
+                return result;
             }
             catch
             {
@@ -323,14 +360,20 @@ namespace ReverseToolkit
 
         private byte[] ParseHexString(string hex)
         {
-            hex = hex.Replace(" ", "").Replace("-", "");
+            hex = (hex ?? string.Empty).Replace(" ", "").Replace("-", "");
+            if (hex.Length == 0)
+                return Array.Empty<byte>();
+
+            if (hex.Length % 2 != 0)
+                hex = "0" + hex; // дополняем ведущим нулём
+
             byte[] bytes = new byte[hex.Length / 2];
-            
+
             for (int i = 0; i < bytes.Length; i++)
             {
                 bytes[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
             }
-            
+
             return bytes;
         }
 
@@ -339,7 +382,7 @@ namespace ReverseToolkit
             string[] sizes = { "B", "KB", "MB", "GB" };
             double len = bytes;
             int order = 0;
-            
+
             while (len >= 1024 && order < sizes.Length - 1)
             {
                 order++;
