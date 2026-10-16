@@ -63,13 +63,24 @@ namespace ReverseToolkit
                 
                 // Read up to 15 bytes for instruction (max x86/x64 instruction length)
                 int bytesToRead = Math.Min(15, bytes.Length - offset);
+
+                // Защита: если нет доступных байт — выходим
+                if (bytesToRead <= 0)
+                    break;
+
                 byte[] instrBytes = new byte[bytesToRead];
                 Array.Copy(bytes, offset, instrBytes, 0, bytesToRead);
 
                 // Try to detect instruction length (simplified)
                 int instrLen = DetectInstructionLength(instrBytes, architecture == "x64");
+
+                // Защита: если детектор вернул <=0 или больше доступных байт — корректируем
+                if (instrLen <= 0)
+                    instrLen = 1;
+                else if (instrLen > bytesToRead)
+                    instrLen = bytesToRead;
                 
-                // Format hex bytes
+                // Format hex bytes (без выхода за границы)
                 string hexBytes = string.Join(" ", instrBytes.Take(instrLen).Select(b => b.ToString("X2")));
                 string padding = new string(' ', Math.Max(0, 45 - hexBytes.Length));
 
