@@ -11,7 +11,7 @@ namespace ReverseToolkit
         private byte[]? fileData;
         private string? filePath;
         private PEHeader? peHeader;
-        
+
         public void LoadPEFile(string path)
         {
             filePath = path;
@@ -19,65 +19,93 @@ namespace ReverseToolkit
             peHeader = ParsePEHeader(fileData);
         }
 
+        private static ushort ReadUInt16Safe(byte[] data, int offset)
+        {
+            if (offset < 0 || offset + 2 > data.Length)
+                throw new InvalidDataException("Unexpected end of file while reading UInt16");
+            return BitConverter.ToUInt16(data, offset);
+        }
+
+        private static uint ReadUInt32Safe(byte[] data, int offset)
+        {
+            if (offset < 0 || offset + 4 > data.Length)
+                throw new InvalidDataException("Unexpected end of file while reading UInt32");
+            return BitConverter.ToUInt32(data, offset);
+        }
+
+        private static ulong ReadUInt64Safe(byte[] data, int offset)
+        {
+            if (offset < 0 || offset + 8 > data.Length)
+                throw new InvalidDataException("Unexpected end of file while reading UInt64");
+            return BitConverter.ToUInt64(data, offset);
+        }
+
         private PEHeader ParsePEHeader(byte[] data)
         {
             var header = new PEHeader();
-            
+
             // DOS Header
             if (data.Length < 64)
                 throw new InvalidDataException("File too small for PE format");
-            
+
             // Check DOS signature "MZ"
             if (data[0] != 0x4D || data[1] != 0x5A)
                 throw new InvalidDataException("Invalid DOS signature");
-            
+
             // Get PE header offset
-            int peOffset = BitConverter.ToInt32(data, 0x3C);
-            
+            int peOffset = (int)ReadUInt32Safe(data, 0x3C);
+
             if (peOffset + 4 >= data.Length)
                 throw new InvalidDataException("Invalid PE offset");
-            
+
             // Check PE signature "PE\0\0"
-            if (data[peOffset] != 0x50 || data[peOffset + 1] != 0x45)
+            if (data[peOffset] != 0x50 || data[peOffset + 1] != 0x45 || data[peOffset + 2] != 0x00 || data[peOffset + 3] != 0x00)
                 throw new InvalidDataException("Invalid PE signature");
-            
+
             header.PEOffset = peOffset;
-            
+
             // COFF Header (после PE signature)
             int coffOffset = peOffset + 4;
-            header.Machine = BitConverter.ToUInt16(data, coffOffset);
-            header.NumberOfSections = BitConverter.ToUInt16(data, coffOffset + 2);
-            header.TimeDateStamp = BitConverter.ToUInt32(data, coffOffset + 4);
-            header.PointerToSymbolTable = BitConverter.ToUInt32(data, coffOffset + 8);
-            header.NumberOfSymbols = BitConverter.ToUInt32(data, coffOffset + 12);
-            header.SizeOfOptionalHeader = BitConverter.ToUInt16(data, coffOffset + 16);
-            header.Characteristics = BitConverter.ToUInt16(data, coffOffset + 18);
-            
+
+            header.Machine = ReadUInt16Safe(data, coffOffset);
+            header.NumberOfSections = ReadUInt16Safe(data, coffOffset + 2);
+            header.TimeDateStamp = ReadUInt32Safe(data, coffOffset + 4);
+            header.PointerToSymbolTable = ReadUInt32Safe(data, coffOffset + 8);
+            header.NumberOfSymbols = ReadUInt32Safe(data, coffOffset + 12);
+            header.SizeOfOptionalHeader = ReadUInt16Safe(data, coffOffset + 16);
+            header.Characteristics = ReadUInt16Safe(data, coffOffset + 18);
+
             // Optional Header
             int optionalHeaderOffset = coffOffset + 20;
-            header.Magic = BitConverter.ToUInt16(data, optionalHeaderOffset);
+            if (optionalHeaderOffset + header.SizeOfOptionalHeader > data.Length)
+                throw new InvalidDataException("Optional header extends beyond file size");
+
+            header.Magic = ReadUInt16Safe(data, optionalHeaderOffset);
             header.Is64Bit = header.Magic == 0x20b;
-            
-            header.AddressOfEntryPoint = BitConverter.ToUInt32(data, optionalHeaderOffset + 16);
-            header.ImageBase = header.Is64Bit 
-                ? BitConverter.ToUInt64(data, optionalHeaderOffset + 24)
-                : BitConverter.ToUInt32(data, optionalHeaderOffset + 28);
-            
-            header.SectionAlignment = BitConverter.ToUInt32(data, optionalHeaderOffset + 32);
-            header.FileAlignment = BitConverter.ToUInt32(data, optionalHeaderOffset + 36);
-            
-            int dataDirectoryOffset = header.Is64Bit 
-                ? optionalHeaderOffset + 112 
+
+            header.AddressOfEntryPoint = ReadUInt32Safe(data, optionalHeaderOffset + 16);
+            header.ImageBase = header.Is64Bit
+                ? ReadUInt64Safe(data, optionalHeaderOffset + 24)
+                : ReadUInt32Safe(data, optionalHeaderOffset + 28);
+
+            header.SectionAlignment = ReadUInt32Safe(data, optionalHeaderOffset + 32);
+            header.FileAlignment = ReadUInt32Safe(data, optionalHeaderOffset + 36);
+
+            int dataDirectoryOffset = header.Is64Bit
+                ? optionalHeaderOffset + 112
                 : optionalHeaderOffset + 96;
-            
+
+            if (dataDirectoryOffset + 16 > data.Length)
+                throw new InvalidDataException("Data directories extend beyond file size");
+
             // Import Directory
-            header.ImportDirectoryRVA = BitConverter.ToUInt32(data, dataDirectoryOffset + 8);
-            header.ImportDirectorySize = BitConverter.ToUInt32(data, dataDirectoryOffset + 12);
-            
+            header.ImportDirectoryRVA = ReadUInt32Safe(data, dataDirectoryOffset + 8);
+            header.ImportDirectorySize = ReadUInt32Safe(data, dataDirectoryOffset + 12);
+
             // Export Directory
-            header.ExportDirectoryRVA = BitConverter.ToUInt32(data, dataDirectoryOffset);
-            header.ExportDirectorySize = BitConverter.ToUInt32(data, dataDirectoryOffset + 4);
-            
+            header.ExportDirectoryRVA = ReadUInt32Safe(data, dataDirectoryOffset);
+            header.ExportDirectorySize = ReadUInt32Safe(data, dataDirectoryOffset + 4);
+
             return header;
         }
 
@@ -85,20 +113,20 @@ namespace ReverseToolkit
         {
             if (peHeader == null)
                 return "PE file not loaded";
-            
+
             var sb = new StringBuilder();
             sb.AppendLine("═══════════════════════════════════════════════════════════");
             sb.AppendLine("                    PE HEADER ANALYSIS");
             sb.AppendLine("═══════════════════════════════════════════════════════════");
             sb.AppendLine();
-            
+
             sb.AppendLine("📋 BASIC INFORMATION:");
             sb.AppendLine($"  File:              {Path.GetFileName(filePath)}");
             sb.AppendLine($"  Size:              {fileData?.Length:N0} bytes");
             sb.AppendLine($"  Architecture:      {(peHeader.Is64Bit ? "x64 (64-bit)" : "x86 (32-bit)")}");
             sb.AppendLine($"  Machine Type:      0x{peHeader.Machine:X4} ({GetMachineType(peHeader.Machine)})");
             sb.AppendLine();
-            
+
             sb.AppendLine("🔧 COFF HEADER:");
             sb.AppendLine($"  PE Offset:         0x{peHeader.PEOffset:X8}");
             sb.AppendLine($"  Sections:          {peHeader.NumberOfSections}");
@@ -109,7 +137,7 @@ namespace ReverseToolkit
             sb.AppendLine($"  Characteristics:   0x{peHeader.Characteristics:X4}");
             sb.AppendLine($"    {GetCharacteristics(peHeader.Characteristics)}");
             sb.AppendLine();
-            
+
             sb.AppendLine("⚙️ OPTIONAL HEADER:");
             sb.AppendLine($"  Magic:             0x{peHeader.Magic:X4}");
             sb.AppendLine($"  Entry Point:       0x{peHeader.AddressOfEntryPoint:X8}");
@@ -117,14 +145,14 @@ namespace ReverseToolkit
             sb.AppendLine($"  Section Align:     0x{peHeader.SectionAlignment:X8}");
             sb.AppendLine($"  File Align:        0x{peHeader.FileAlignment:X8}");
             sb.AppendLine();
-            
+
             sb.AppendLine("📁 DATA DIRECTORIES:");
             sb.AppendLine($"  Import Dir RVA:    0x{peHeader.ImportDirectoryRVA:X8}");
             sb.AppendLine($"  Import Dir Size:   {peHeader.ImportDirectorySize} bytes");
             sb.AppendLine($"  Export Dir RVA:    0x{peHeader.ExportDirectoryRVA:X8}");
             sb.AppendLine($"  Export Dir Size:   {peHeader.ExportDirectorySize} bytes");
             sb.AppendLine();
-            
+
             return sb.ToString();
         }
 
@@ -132,27 +160,29 @@ namespace ReverseToolkit
         {
             if (fileData == null || peHeader == null)
                 return new List<PESection>();
-            
+
             var sections = new List<PESection>();
             int sectionHeaderOffset = peHeader.PEOffset + 24 + peHeader.SizeOfOptionalHeader;
-            
+
             for (int i = 0; i < peHeader.NumberOfSections; i++)
             {
                 int offset = sectionHeaderOffset + (i * 40);
-                
+                if (offset + 40 > fileData.Length)
+                    break; // corrupted or truncated
+
                 var section = new PESection
                 {
                     Name = Encoding.ASCII.GetString(fileData, offset, 8).TrimEnd('\0'),
-                    VirtualSize = BitConverter.ToUInt32(fileData, offset + 8),
-                    VirtualAddress = $"0x{BitConverter.ToUInt32(fileData, offset + 12):X8}",
-                    RawSize = BitConverter.ToUInt32(fileData, offset + 16),
-                    RawPointer = BitConverter.ToUInt32(fileData, offset + 20),
-                    Characteristics = GetSectionCharacteristics(BitConverter.ToUInt32(fileData, offset + 36))
+                    VirtualSize = ReadUInt32Safe(fileData, offset + 8),
+                    VirtualAddress = $"0x{ReadUInt32Safe(fileData, offset + 12):X8}",
+                    RawSize = ReadUInt32Safe(fileData, offset + 16),
+                    RawPointer = ReadUInt32Safe(fileData, offset + 20),
+                    Characteristics = GetSectionCharacteristics(ReadUInt32Safe(fileData, offset + 36))
                 };
-                
+
                 sections.Add(section);
             }
-            
+
             return sections;
         }
 
@@ -160,35 +190,40 @@ namespace ReverseToolkit
         {
             if (fileData == null || peHeader == null || peHeader.ImportDirectoryRVA == 0)
                 return new List<PEImport>();
-            
+
             var imports = new List<PEImport>();
-            
+
             try
             {
                 int importOffset = RVAToFileOffset(peHeader.ImportDirectoryRVA);
-                
-                while (true)
+                if (importOffset <= 0 || importOffset >= fileData.Length)
+                    return imports;
+
+                while (importOffset + 20 <= fileData.Length)
                 {
-                    uint nameRVA = BitConverter.ToUInt32(fileData, importOffset + 12);
+                    uint nameRVA = ReadUInt32Safe(fileData, importOffset + 12);
                     if (nameRVA == 0) break;
-                    
-                    uint thunkRVA = BitConverter.ToUInt32(fileData, importOffset);
+
+                    uint thunkRVA = ReadUInt32Safe(fileData, importOffset);
                     int dllNameOffset = RVAToFileOffset(nameRVA);
+                    if (dllNameOffset < 0 || dllNameOffset >= fileData.Length) break;
+
                     string dllName = ReadNullTerminatedString(fileData, dllNameOffset);
-                    
+
                     // Read import functions
                     int thunkOffset = RVAToFileOffset(thunkRVA);
-                    
-                    while (thunkOffset < fileData.Length)
+                    if (thunkOffset < 0 || thunkOffset >= fileData.Length) break;
+
+                    while (thunkOffset + (peHeader.Is64Bit ? 8 : 4) <= fileData.Length)
                     {
-                        ulong thunkValue = peHeader.Is64Bit 
-                            ? BitConverter.ToUInt64(fileData, thunkOffset)
-                            : BitConverter.ToUInt32(fileData, thunkOffset);
-                        
+                        ulong thunkValue = peHeader.Is64Bit
+                            ? ReadUInt64Safe(fileData, thunkOffset)
+                            : ReadUInt32Safe(fileData, thunkOffset);
+
                         if (thunkValue == 0) break;
-                        
+
                         string functionName;
-                        
+
                         // Check if import by ordinal
                         if ((peHeader.Is64Bit && (thunkValue & 0x8000000000000000) != 0) ||
                             (!peHeader.Is64Bit && (thunkValue & 0x80000000) != 0))
@@ -199,28 +234,29 @@ namespace ReverseToolkit
                         else
                         {
                             uint nameRVAFunc = (uint)(thunkValue & 0x7FFFFFFF);
-                            int funcNameOffset = RVAToFileOffset(nameRVAFunc) + 2;
+                            int funcNameOffset = RVAToFileOffset(nameRVAFunc) + 2; // skip hint
+                            if (funcNameOffset < 0 || funcNameOffset >= fileData.Length) break;
                             functionName = ReadNullTerminatedString(fileData, funcNameOffset);
                         }
-                        
+
                         imports.Add(new PEImport
                         {
                             DllName = dllName,
                             FunctionName = functionName,
                             Address = $"0x{thunkValue:X}"
                         });
-                        
+
                         thunkOffset += peHeader.Is64Bit ? 8 : 4;
                     }
-                    
+
                     importOffset += 20;
                 }
             }
             catch
             {
-                // Import parsing failed
+                // Import parsing failed - return what we have
             }
-            
+
             return imports;
         }
 
@@ -228,32 +264,49 @@ namespace ReverseToolkit
         {
             if (fileData == null || peHeader == null || peHeader.ExportDirectoryRVA == 0)
                 return new List<PEExport>();
-            
+
             var exports = new List<PEExport>();
-            
+
             try
             {
                 int exportOffset = RVAToFileOffset(peHeader.ExportDirectoryRVA);
-                
-                uint numberOfFunctions = BitConverter.ToUInt32(fileData, exportOffset + 20);
-                uint numberOfNames = BitConverter.ToUInt32(fileData, exportOffset + 24);
-                uint addressTableRVA = BitConverter.ToUInt32(fileData, exportOffset + 28);
-                uint nameTableRVA = BitConverter.ToUInt32(fileData, exportOffset + 32);
-                uint ordinalTableRVA = BitConverter.ToUInt32(fileData, exportOffset + 36);
-                
+                if (exportOffset <= 0 || exportOffset + 40 > fileData.Length)
+                    return exports;
+
+                uint numberOfFunctions = ReadUInt32Safe(fileData, exportOffset + 20);
+                uint numberOfNames = ReadUInt32Safe(fileData, exportOffset + 24);
+                uint addressTableRVA = ReadUInt32Safe(fileData, exportOffset + 28);
+                uint nameTableRVA = ReadUInt32Safe(fileData, exportOffset + 32);
+                uint ordinalTableRVA = ReadUInt32Safe(fileData, exportOffset + 36);
+
                 int addressTableOffset = RVAToFileOffset(addressTableRVA);
                 int nameTableOffset = RVAToFileOffset(nameTableRVA);
                 int ordinalTableOffset = RVAToFileOffset(ordinalTableRVA);
-                
+
+                if (addressTableOffset < 0 || nameTableOffset < 0 || ordinalTableOffset < 0)
+                    return exports;
+
                 for (int i = 0; i < numberOfNames; i++)
                 {
-                    uint nameRVA = BitConverter.ToUInt32(fileData, nameTableOffset + (i * 4));
-                    ushort ordinal = BitConverter.ToUInt16(fileData, ordinalTableOffset + (i * 2));
-                    uint functionRVA = BitConverter.ToUInt32(fileData, addressTableOffset + (ordinal * 4));
-                    
+                    int nameRVAOffset = nameTableOffset + (i * 4);
+                    if (nameRVAOffset + 4 > fileData.Length) break;
+
+                    uint nameRVA = ReadUInt32Safe(fileData, nameRVAOffset);
+                    int ordinalOffset = ordinalTableOffset + (i * 2);
+                    if (ordinalOffset + 2 > fileData.Length) break;
+
+                    ushort ordinal = ReadUInt16Safe(fileData, ordinalOffset);
+
+                    int addressOffset = addressTableOffset + (ordinal * 4);
+                    if (addressOffset + 4 > fileData.Length) break;
+
+                    uint functionRVA = ReadUInt32Safe(fileData, addressOffset);
+
                     int nameOffset = RVAToFileOffset(nameRVA);
+                    if (nameOffset < 0 || nameOffset >= fileData.Length) continue;
+
                     string functionName = ReadNullTerminatedString(fileData, nameOffset);
-                    
+
                     exports.Add(new PEExport
                     {
                         FunctionName = functionName,
@@ -266,44 +319,54 @@ namespace ReverseToolkit
             {
                 // Export parsing failed
             }
-            
+
             return exports;
         }
 
         private int RVAToFileOffset(uint rva)
         {
             if (peHeader == null || fileData == null)
-                return 0;
-            
+                return -1;
+
             int sectionHeaderOffset = peHeader.PEOffset + 24 + peHeader.SizeOfOptionalHeader;
-            
+            if (sectionHeaderOffset < 0 || sectionHeaderOffset >= fileData.Length)
+                return -1;
+
             for (int i = 0; i < peHeader.NumberOfSections; i++)
             {
                 int offset = sectionHeaderOffset + (i * 40);
-                uint virtualAddress = BitConverter.ToUInt32(fileData, offset + 12);
-                uint virtualSize = BitConverter.ToUInt32(fileData, offset + 8);
-                uint rawPointer = BitConverter.ToUInt32(fileData, offset + 20);
-                
+                if (offset + 40 > fileData.Length) break;
+
+                uint virtualAddress = ReadUInt32Safe(fileData, offset + 12);
+                uint virtualSize = ReadUInt32Safe(fileData, offset + 8);
+                uint rawPointer = ReadUInt32Safe(fileData, offset + 20);
+
                 if (rva >= virtualAddress && rva < virtualAddress + virtualSize)
                 {
-                    return (int)(rva - virtualAddress + rawPointer);
+                    long calc = (long)rva - virtualAddress + rawPointer;
+                    if (calc < 0 || calc > int.MaxValue || calc >= fileData.Length) return -1;
+                    return (int)calc;
                 }
             }
-            
-            return (int)rva;
+
+            // If not found in sections, return rva as fallback if within file
+            if (rva < fileData.Length)
+                return (int)rva;
+
+            return -1;
         }
 
         private string ReadNullTerminatedString(byte[] data, int offset)
         {
             if (offset < 0 || offset >= data.Length)
                 return string.Empty;
-            
+
             int length = 0;
             while (offset + length < data.Length && data[offset + length] != 0)
             {
                 length++;
             }
-            
+
             return Encoding.ASCII.GetString(data, offset, length);
         }
 
@@ -334,7 +397,7 @@ namespace ReverseToolkit
             if ((characteristics & 0x0200) != 0) flags.Add("DEBUG_STRIPPED");
             if ((characteristics & 0x1000) != 0) flags.Add("SYSTEM");
             if ((characteristics & 0x2000) != 0) flags.Add("DLL");
-            
+
             return string.Join(", ", flags);
         }
 
@@ -349,24 +412,24 @@ namespace ReverseToolkit
             if ((characteristics & 0x20000000) != 0) flags.Add("EXECUTE");
             if ((characteristics & 0x40000000) != 0) flags.Add("READ");
             if ((characteristics & 0x80000000) != 0) flags.Add("WRITE");
-            
+
             return string.Join(" | ", flags);
         }
 
         public void ExportAnalysis(string outputPath)
         {
             var sb = new StringBuilder();
-            
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+
+            sb.AppendLine("════════════════════════════════════════════════════════");
             sb.AppendLine("           PE ANALYSIS REPORT");
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("════════════════════════════════════════════════════════");
             sb.AppendLine();
             sb.AppendLine(GetHeaders());
             sb.AppendLine();
-            
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+
+            sb.AppendLine("════════════════════════════════════════════════════════");
             sb.AppendLine("                    SECTIONS");
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("════════════════════════════════════════════════════════");
             foreach (var section in GetSections())
             {
                 sb.AppendLine($"Section: {section.Name}");
@@ -376,10 +439,10 @@ namespace ReverseToolkit
                 sb.AppendLine($"  Characteristics: {section.Characteristics}");
                 sb.AppendLine();
             }
-            
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+
+            sb.AppendLine("════════════════════════════════════════════════════════");
             sb.AppendLine("                    IMPORTS");
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("════════════════════════════════════════════════════════");
             var imports = GetImports().GroupBy(i => i.DllName);
             foreach (var dll in imports)
             {
@@ -389,15 +452,15 @@ namespace ReverseToolkit
                     sb.AppendLine($"  - {func.FunctionName}");
                 }
             }
-            
-            sb.AppendLine("\n═══════════════════════════════════════════════════════════");
+
+            sb.AppendLine("\n═══════════════════════════════════════════════════════");
             sb.AppendLine("                    EXPORTS");
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("════════════════════════════════════════════════════════");
             foreach (var export in GetExports())
             {
                 sb.AppendLine($"  {export.FunctionName} (Ordinal: {export.Ordinal}, RVA: {export.Rva})");
             }
-            
+
             File.WriteAllText(outputPath, sb.ToString());
         }
     }
