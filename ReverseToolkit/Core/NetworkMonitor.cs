@@ -134,7 +134,8 @@ namespace ReverseToolkit
                                 Source = conn.Source,
                                 Destination = conn.Destination,
                                 Url = conn.Url,
-                                Timestamp = DateTime.Now
+                                Timestamp = DateTime.Now,
+                                Data = Array.Empty<byte>()
                             });
                         }
                     }
@@ -164,7 +165,8 @@ namespace ReverseToolkit
                                 Source = conn.Source,
                                 Destination = conn.Destination,
                                 Url = conn.Url,
-                                Timestamp = DateTime.Now
+                                Timestamp = DateTime.Now,
+                                Data = Array.Empty<byte>()
                             });
                         }
                     }
@@ -174,6 +176,7 @@ namespace ReverseToolkit
                 catch (Exception ex)
                 {
                     Debug.WriteLine($"Network monitoring error: {ex.Message}");
+                    Thread.Sleep(500);
                 }
             }
         }
@@ -182,14 +185,17 @@ namespace ReverseToolkit
         {
             var connections = new List<NetworkConnection>();
             int bufferSize = 0;
-            
-            // Получаем размер буфера
-            GetExtendedTcpTable(IntPtr.Zero, ref bufferSize, true, AF_INET, TCP_TABLE_CLASS.TCP_TABLE_OWNER_PID_ALL, 0);
-            
-            IntPtr tcpTablePtr = Marshal.AllocHGlobal(bufferSize);
-            
+
+            // Первый вызов: получить требуемый размер буфера
+            uint init = GetExtendedTcpTable(IntPtr.Zero, ref bufferSize, true, AF_INET, TCP_TABLE_CLASS.TCP_TABLE_OWNER_PID_ALL, 0);
+            if (bufferSize <= 0)
+                return connections;
+
+            IntPtr tcpTablePtr = IntPtr.Zero;
+
             try
             {
+                tcpTablePtr = Marshal.AllocHGlobal(bufferSize);
                 uint result = GetExtendedTcpTable(tcpTablePtr, ref bufferSize, true, AF_INET, TCP_TABLE_CLASS.TCP_TABLE_OWNER_PID_ALL, 0);
                 
                 if (result == 0)
@@ -225,9 +231,14 @@ namespace ReverseToolkit
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"GetTcpConnections error: {ex.Message}");
+            }
             finally
             {
-                Marshal.FreeHGlobal(tcpTablePtr);
+                if (tcpTablePtr != IntPtr.Zero)
+                    Marshal.FreeHGlobal(tcpTablePtr);
             }
 
             return connections;
@@ -237,13 +248,16 @@ namespace ReverseToolkit
         {
             var connections = new List<NetworkConnection>();
             int bufferSize = 0;
-            
-            GetExtendedUdpTable(IntPtr.Zero, ref bufferSize, true, AF_INET, UDP_TABLE_CLASS.UDP_TABLE_OWNER_PID, 0);
-            
-            IntPtr udpTablePtr = Marshal.AllocHGlobal(bufferSize);
-            
+
+            uint init = GetExtendedUdpTable(IntPtr.Zero, ref bufferSize, true, AF_INET, UDP_TABLE_CLASS.UDP_TABLE_OWNER_PID, 0);
+            if (bufferSize <= 0)
+                return connections;
+
+            IntPtr udpTablePtr = IntPtr.Zero;
+
             try
             {
+                udpTablePtr = Marshal.AllocHGlobal(bufferSize);
                 uint result = GetExtendedUdpTable(udpTablePtr, ref bufferSize, true, AF_INET, UDP_TABLE_CLASS.UDP_TABLE_OWNER_PID, 0);
                 
                 if (result == 0)
@@ -273,9 +287,14 @@ namespace ReverseToolkit
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"GetUdpConnections error: {ex.Message}");
+            }
             finally
             {
-                Marshal.FreeHGlobal(udpTablePtr);
+                if (udpTablePtr != IntPtr.Zero)
+                    Marshal.FreeHGlobal(udpTablePtr);
             }
 
             return connections;
@@ -305,6 +324,9 @@ namespace ReverseToolkit
         {
             try
             {
+                if (string.IsNullOrEmpty(ipAndPort))
+                    return string.Empty;
+
                 string ip = ipAndPort.Split(':')[0];
 
                 if (dnsCache.ContainsKey(ip))
@@ -314,8 +336,18 @@ namespace ReverseToolkit
                         return cached.Hostname;
                 }
 
-                var hostEntry = Dns.GetHostEntry(ip);
-                string hostname = hostEntry.HostName;
+                // Use try/catch for DNS lookup - it can fail for many reasons
+                string hostname;
+                try
+                {
+                    var hostEntry = Dns.GetHostEntry(ip);
+                    hostname = hostEntry.HostName;
+                }
+                catch
+                {
+                    // If reverse lookup fails, just return original ipAndPort
+                    return ipAndPort;
+                }
                 
                 dnsCache[ip] = new DnsCache
                 {
@@ -359,7 +391,10 @@ namespace ReverseToolkit
 
         public List<NetworkConnection> GetConnections()
         {
-            return connections.OrderByDescending(c => c.Timestamp).ToList();
+            // Try to parse Timestamp (HH:mm:ss) into DateTime for reliable sorting
+            return connections
+                .OrderByDescending(c => DateTime.TryParse(c.Timestamp, out var t) ? DateTime.Today.Add(t.TimeOfDay) : DateTime.MinValue)
+                .ToList();
         }
 
         public void ClearLog()
@@ -375,8 +410,8 @@ namespace ReverseToolkit
             sb.AppendLine("     СТАТИСТИКА СЕТИ");
             sb.AppendLine("═══════════════════════════════════════");
             sb.AppendLine($"Всего соединений: {connections.Count}");
-            sb.AppendLine($"TCP соединений:   {connections.Count(c => c.Protocol == "TCP")}");
-            sb.AppendLine($"UDP соединений:   {connections.Count(c => c.Protocol == "UDP")}");
+            sb.AppendLine($"TCP соединений:   {connections.Count(c => c.Protocol == \"TCP\")}");
+            sb.AppendLine($"UDP соединений:   {connections.Count(c => c.Protocol == \"UDP\")}");
             sb.AppendLine();
 
             var topDestinations = connections
@@ -398,17 +433,16 @@ namespace ReverseToolkit
             // Анализ скачанных файлов по HTTP соединениям
             var downloads = new List<DownloadInfo>();
 
-            var httpConnections = connections.Where(c => 
-                c.Destination.Contains(":80") || 
-                c.Destination.Contains(":443") ||
-                c.Url.Contains("http"));
+            var httpConnections = connections.Where(c =>
+                (!string.IsNullOrEmpty(c.Destination) && (c.Destination.Contains(":80") || c.Destination.Contains(":443"))) ||
+                (!string.IsNullOrEmpty(c.Url) && c.Url.Contains("http", StringComparison.OrdinalIgnoreCase)));
 
             foreach (var conn in httpConnections)
             {
                 downloads.Add(new DownloadInfo
                 {
-                    Url = conn.Url,
-                    Server = conn.Destination,
+                    Url = conn.Url ?? string.Empty,
+                    Server = conn.Destination ?? string.Empty,
                     Protocol = conn.Protocol,
                     Timestamp = conn.Timestamp,
                     Status = "Detected"
@@ -421,19 +455,20 @@ namespace ReverseToolkit
         public string ExportToLog(string filePath)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("════════════════════════════════════════════════════════");
             sb.AppendLine("           NETWORK MONITORING LOG");
             sb.AppendLine($"           Generated: {DateTime.Now}");
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("════════════════════════════════════════════════════════");
             sb.AppendLine();
 
             sb.AppendLine(GetNetworkStatistics());
             sb.AppendLine();
 
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
+            sb.AppendLine("════════════════════════════════════════════════════════");
             sb.AppendLine("                ALL CONNECTIONS");
-            sb.AppendLine("═══════════════════════════════════════════════════════════");
-            
+            sb.AppendLine("════════════════════════════════════════════════════════");
+            sb.AppendLine();
+
             foreach (var conn in connections)
             {
                 sb.AppendLine($"[{conn.Timestamp}] {conn.Protocol} | {conn.Source} -> {conn.Destination}");
